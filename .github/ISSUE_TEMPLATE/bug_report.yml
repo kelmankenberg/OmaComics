@@ -1,0 +1,44 @@
+name: Bug report
+description: Report a problem with OmaComics.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please search existing issues first. Do not include API keys, private files,
+        full library paths, or other sensitive information. Redact screenshots and logs.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected to happen.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open OmaComics
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: OmaComics version
+      description: Run omacomics --version.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Desktop and operating system
+      placeholder: Omarchy version, or another desktop and Linux distribution
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: Additional details
+      description: Optional screenshots, redacted errors, or comic format (CBZ, CBR, PDF, etc.). Do not upload copyrighted comics.
