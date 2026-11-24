@@ -10,25 +10,72 @@ On startup, OmaComics checks library folders for new or changed files instead of
 
 The companion `kel.omacomics` bar widget shows the current title and progress. Click it for resume/open actions; use Omarchy's normal bar controls to move it. Right-click opens the library directly.
 
-## Requirements
+## Install
 
-- Qt 6, CMake, and a C++17 compiler
-- `7zip` for CBZ/CBR/CB7/CBT archives
-- Poppler (`pdfinfo` and `pdftoppm`) for PDF indexing and rendering
-- An XDG desktop portal for choosing library folders
+**Manual reader setup is required.** This repository contains both the native reader (`src/`) and the Omarchy Quattro bar plugin (root `manifest.json`, `BarWidget.qml`, `ReadingStatus.js`, and `i18n/`). Installing the plugin alone does not compile or install the reader. There is no published reader package or prebuilt binary yet.
 
-## Build and install locally
+### 1. Install the native reader
+
+On Omarchy/Arch, install the build and runtime dependencies explicitly:
 
 ```sh
-bin/test
-cmake --install build --prefix ~/.local
+sudo pacman -S --needed git base-devel cmake qt6-base qt6-declarative qt6-svg 7zip poppler ttf-dejavu
 ```
 
-After installing the app, put the widget on the right side of the bar:
+This package-manager command requires administrator approval. All following build and installation commands run as your normal user. An existing XDG desktop portal is required for folder/file selection; Omarchy supplies it. `7zip` provides `7z` for CBZ/CBR/CB7/CBT archives; Poppler provides `pdfinfo` and `pdftoppm` for PDFs. The font package is needed by headless UI tests. Optional `libsecret` supplies `secret-tool` for secure API-key storage; without it, keys remain session-only and the app reports the limitation.
+
+Clone this repository into a source directory you control, review the source, then build, test, and install:
 
 ```sh
+git clone https://github.com/kelmankenberg/OmaComics.git
+cd OmaComics
+git rev-parse HEAD
+bin/test
+cmake --install build --prefix "$HOME/.local"
+"$HOME/.local/bin/omacomics" --version
+```
+
+CMake 3.21+, a C++17 compiler, and Qt 6 Core, Gui, Network, Qml, Quick, QuickControls2, DBus, Concurrent, and Test are required. No third-party source is downloaded during the build. Installation writes only the reader binary, desktop entry, icon, and license under `~/.local`; it does not modify desktop configuration or install services. Ensure `~/.local/bin` is on the desktop session's `PATH` (the Omarchy default) so the widget can launch `omacomics`.
+
+### 2. Install and enable the bar plugin
+
+```sh
+omarchy plugin add https://github.com/kelmankenberg/OmaComics.git --enable
 omarchy bar put kel.omacomics --section right
 ```
+
+Left-click the icon for reading progress and reader launch buttons. Right-click opens the reader. The icon uses the theme accent while a comic is in progress and returns to the normal foreground when none is in progress. The popup follows the desktop language and direction; English and Danish catalogs are included, with English fallback for other languages.
+
+The plugin manager obtains this repository separately from the reader source checkout. Updating the plugin does **not** rebuild the native reader: update your source checkout, review the changes, and repeat `bin/test` and the CMake installation command. Keep the two installations on matching versions. The marketplace's verification applies to its exact reviewed commit, not automatically to later upstream changes.
+
+## Remove
+
+Remove the bar plugin with Omarchy's plugin manager:
+
+```sh
+omarchy plugin remove kel.omacomics
+```
+
+For the user-local reader installation above, remove only these installed files:
+
+```sh
+rm -- "$HOME/.local/bin/omacomics" \
+  "$HOME/.local/share/applications/omacomics.desktop" \
+  "$HOME/.local/share/icons/hicolor/scalable/apps/omacomics.svg" \
+  "$HOME/.local/share/licenses/omacomics/LICENSE"
+```
+
+Close the reader before removing it. These commands do not remove your source checkout, comics, library, settings, reading history, backups, saved credentials, or image cache. To remove a stored Comic Vine key, use **Settings > Comic Vine > Forget API key** before uninstalling. A reader installed with a different CMake prefix must be removed from that prefix instead; the commands above apply only to `~/.local`.
+
+## Permissions, privacy, and marketplace review
+
+The bar plugin runs inside Omarchy's unsandboxed shell. It watches only the reader's local status file, `${XDG_DATA_HOME:-~/.local/share}/omacomics/current.json`, and launches the fixed `omacomics` or `omacomics --resume` commands on user action. Status titles are bounded and displayed as plain text, never interpolated into commands or tooltips. The plugin itself makes no network requests and starts no timers, services, privileged commands, or automatic installers.
+
+The reader scans folders you explicitly add, reads comics in place, and writes its index, preferences, backups, and generated cache under the XDG data/cache locations or the backup folder you choose. It never rewrites comic archives. Startup scanning defaults on and can be disabled. Comic Vine access is opt-in per lookup and uses HTTPS; API keys use the desktop Secret Service when enabled and available. Feedback and API-key links open your browser only when clicked. No analytics, telemetry, automatic uploads, or background metadata scraping are included.
+
+**Maintainer notes:** this is a bar widget with a separately built native application and manual setup. The documented package installation and source build may require marketplace capability review (`package-manager`, `privilege`, `remote-build` or `installer`, as detected by the current baseline). They are disclosed setup requirements, not automatic work performed by the widget. Request the marketplace's **manual-setup** classification when submitting. The MIT license and upstream template attribution are in `LICENSE`; the screenshot is made-up demo artwork. Listing and automated checks are not a security audit or guarantee of approval.
+
+## Library and settings
 
 Choose **Add folder** in OmaComics to select a library. The app persists its index and reading progress under `~/.local/share/omacomics/`.
 

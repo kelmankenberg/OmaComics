@@ -12,7 +12,7 @@ jobs:
   test:
     name: Build and test
     runs-on: ubuntu-latest
-    # The app ships as an Arch package built against Arch's Qt, so it's tested there.
+    timeout-minutes: 20
     container: archlinux:latest
     defaults:
       run:
@@ -21,15 +21,14 @@ jobs:
       - name: Install git for the checkout
         run: pacman -Syu --noconfirm --needed git
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - name: Install the package's dependencies
-        # The package lives in omarchy-pkgs, so its PKGBUILD is the one list of what the app needs and CI reads it rather than keeping a copy.
+      - name: Install build and test dependencies
+        # Keep source builds working before an omarchy-pkgs recipe is published.
         run: |
-          curl -fsSL "https://raw.githubusercontent.com/omacom/omarchy-pkgs/master/pkgbuilds/${{ github.event.repository.name }}/PKGBUILD" -o "$RUNNER_TEMP/PKGBUILD"
-          source "$RUNNER_TEMP/PKGBUILD"
-          deps=("${depends[@]}" "${makedepends[@]}" "${checkdepends[@]}")
-          pacman -S --noconfirm --needed base-devel cmake dbus "${deps[@]%%[<>=]*}"
+          pacman -S --noconfirm --needed \
+            base-devel cmake dbus qt6-base qt6-declarative qt6-svg \
+            7zip poppler ttf-dejavu
 
       - name: Set up a user and a locale like a desktop's
         # Root can read any file, so tests about unreadable ones need an ordinary user, with a second group for tests that change a file's group; and the container generates no locale.

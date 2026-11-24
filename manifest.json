@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "kel.omacomics",
+  "name": "OmaComics",
+  "version": "0.1.0",
+  "author": "kelmankenberg",
+  "license": "MIT",
+  "description": "Open the OmaComics reader and show current comic reading progress. Requires manual reader setup.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaComics",
+    "description": "Launch the comic library and check reading progress.",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

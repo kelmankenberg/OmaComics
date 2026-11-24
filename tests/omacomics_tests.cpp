@@ -6,6 +6,7 @@
 #include <QImage>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QJSEngine>
 #include <QLocalServer>
 #include <QLocalSocket>
 #include <QQmlApplicationEngine>
@@ -2152,6 +2153,46 @@ private slots:
             if (!used.contains(key))
                 problems << "in en.json but no source translates it: " + key;
         QVERIFY2(problems.isEmpty(), qPrintable(problems.join('\n')));
+    }
+
+    void parsesWidgetStatusWithoutInterpretingTitles() {
+        QFile source(QFINDTESTDATA("../ReadingStatus.js"));
+        QVERIFY(source.open(QIODevice::ReadOnly));
+        QJSEngine engine;
+        const QJSValue loaded = engine.evaluate(QString::fromUtf8(source.readAll()));
+        QVERIFY2(!loaded.isError(), qPrintable(loaded.toString()));
+        const auto parse = [&](const QString &raw, bool readFailed = false) {
+            return engine.globalObject().property("parse").call({QJSValue(raw), QJSValue(readFailed)}).toVariant().toMap();
+        };
+        const QString markup = "<img src=\"https://example.invalid/tracker\"> & <b>Comic</b>";
+        auto status = parse(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"title", markup}, {"page", 2}, {"pageCount", 10}, {"progress", 20}}).toJson()));
+        QCOMPARE(status.value("title").toString(), markup);
+        QVERIFY(status.value("available").toBool());
+        QVERIFY(status.value("inProgress").toBool());
+        QCOMPARE(status.value("page").toInt(), 2);
+        status = parse(R"({"title":"Comic","page":10,"pageCount":10,"progress":100})");
+        QVERIFY(!status.value("inProgress").toBool());
+        status = parse(R"({"title":"Comic","page":2,"pageCount":10,"inProgress":false})");
+        QVERIFY(!status.value("inProgress").toBool());
+        status = parse(QString::fromUtf8(QJsonDocument(QJsonObject{
+            {"title", QString(300, 'x')}, {"page", 100001}, {"pageCount", -1}, {"progress", 101}}).toJson()));
+        QCOMPARE(status.value("title").toString().size(), 256);
+        QCOMPARE(status.value("page").toInt(), 100000);
+        QCOMPARE(status.value("pageCount").toInt(), 0);
+        QCOMPARE(status.value("progress").toInt(), 0);
+        for (const QString &invalid : {QString("{"), QString("null"), QString("[]"), QString(8193, 'x')}) {
+            status = parse(invalid);
+            QVERIFY(!status.value("available").toBool());
+            QVERIFY(status.value("title").toString().isEmpty());
+            QVERIFY(!status.value("inProgress").toBool());
+        }
+        status = parse("");
+        QVERIFY(status.value("available").toBool());
+        QVERIFY(!status.value("inProgress").toBool());
+        status = parse("", true);
+        QVERIFY(!status.value("available").toBool());
+        QVERIFY(!status.value("inProgress").toBool());
     }
 
     void catalogsMatchTheEnglishOne() {
