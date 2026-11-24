@@ -1,4 +1,5 @@
 #include "backend.h"
+#include "privatestorage.h"
 
 #include <QCollator>
 #include <QCryptographicHash>
@@ -20,6 +21,7 @@
 #include <QtConcurrent/QtConcurrentRun>
 #include <algorithm>
 #include <cmath>
+#include <sys/stat.h>
 
 namespace {
 
@@ -87,10 +89,20 @@ Backend::Backend(const QString &dataDirectory, const QString &cacheDirectory, QO
         m_cacheDirectory = QDir::homePath() + QStringLiteral("/.cache/omacomics");
     m_libraryFile = m_dataDirectory + QStringLiteral("/library.json");
     m_currentStatusFile = m_dataDirectory + QStringLiteral("/current.json");
-    QDir().mkpath(m_dataDirectory);
-    QDir().mkpath(m_cacheDirectory + QStringLiteral("/covers"));
-    QDir().mkpath(m_cacheDirectory + QStringLiteral("/pages"));
-    QDir().mkpath(m_cacheDirectory + QStringLiteral("/indexes"));
+    m_backupDirectory = m_dataDirectory + QStringLiteral("/backups");
+    for (const QString &directory : {m_dataDirectory, m_cacheDirectory, m_backupDirectory,
+                                    m_cacheDirectory + QStringLiteral("/covers"),
+                                    m_cacheDirectory + QStringLiteral("/pages"),
+                                    m_cacheDirectory + QStringLiteral("/indexes")}) {
+        if (!PrivateStorage::directory(directory)) {
+            m_storageError = tr("Could not secure private comic storage: %1. Reading and indexing are disabled.").arg(directory);
+            setStatus(m_storageError);
+            return;
+        }
+    }
+    m_storageReady = true;
+    m_coverProcess.setChildProcessModifier([] { ::umask(0077); });
+    m_pageProcess.setChildProcessModifier([] { ::umask(0077); });
 
     connect(this, &Backend::comicsChanged, this, &Backend::synchronizeVisibleComics);
     connect(this, &Backend::selectionChanged, this, [this] {
@@ -108,6 +120,8 @@ Backend::Backend(const QString &dataDirectory, const QString &cacheDirectory, QO
             setStatus(error);
         }
         m_backupLocker.reset();
+        if (error.isEmpty() && m_lastPruned.isEmpty())
+            pruneBackups();
     });
     connect(&m_cacheWork, &QFutureWatcher<CacheResult>::finished, this, [this] {
         m_cacheActive = false;
@@ -168,15 +182,23 @@ Backend::Backend(const QString &dataDirectory, const QString &cacheDirectory, QO
             this, &Backend::finishPageExtraction);
 
     setStatus(tr("Add a library folder to get started."));
-    m_backupDirectory = m_dataDirectory + QStringLiteral("/backups");
     loadState();
     m_preferences.insert(QStringLiteral("backupDirectory"), m_backupDirectory);
     loadSettings();
     m_preferencesLoaded = true;
     applyPreferences();
     writeCurrentStatus();
-    if (dailyBackup() && m_preferences.value(QStringLiteral("scanOnStartup")).toBool() && !m_folderPaths.isEmpty())
-        scanLibrary();
+    if (dailyBackup()) {
+        pruneBackups();
+        if (m_preferences.value(QStringLiteral("scanOnStartup")).toBool() && !m_folderPaths.isEmpty())
+            scanLibrary();
+    }
+}
+
+bool Backend::storageReady() {
+    if (!m_storageReady)
+        setStatus(m_storageError);
+    return m_storageReady;
 }
 
 QVariantList Backend::comics() const {
@@ -390,10 +412,11 @@ bool Backend::loadPageIndex(const QString &path) {
 }
 
 bool Backend::savePageIndex(const QString &path, const QString &stamp) {
+    if (!storageReady())
+        return false;
     QSaveFile file(pageIndexPath(path, stamp));
-    file.setDirectWriteFallback(false);
     const QByteArray contents = QJsonDocument(QJsonArray::fromStringList(m_pages.value(path))).toJson(QJsonDocument::Compact);
-    if (!file.open(QIODevice::WriteOnly) || file.write(contents) != contents.size() || !file.commit()) {
+    if (!PrivateStorage::open(file) || file.write(contents) != contents.size() || !file.commit()) {
         setStatus(tr("The page index could not be saved: %1").arg(file.errorString()));
         return false;
     }
@@ -451,10 +474,11 @@ void Backend::loadSettings() {
 }
 
 bool Backend::savePreferences(const QJsonObject &preferences) {
+    if (!storageReady())
+        return false;
     QSaveFile file(m_dataDirectory + QStringLiteral("/settings.json"));
-    file.setDirectWriteFallback(false);
     const QByteArray data = QJsonDocument(preferences).toJson(QJsonDocument::Compact);
-    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
+    if (!PrivateStorage::open(file) || file.write(data) != data.size() || !file.commit()) {
         setStatus(tr("Settings could not be saved: %1").arg(file.errorString()));
         return false;
     }
@@ -500,9 +524,11 @@ bool Backend::setPreference(const QString &name, const QVariant &value) {
 }
 
 bool Backend::setBackupDirectory(const QString &directory) {
+    if (!storageReady())
+        return false;
     const QString path = directory.isEmpty() ? m_dataDirectory + QStringLiteral("/backups")
                                             : QDir::cleanPath(directory);
-    if (directory.isEmpty() && !QDir().mkpath(path)) {
+    if (directory.isEmpty() && !PrivateStorage::directory(path)) {
         setStatus(tr("Could not create the library backup folder."));
         return false;
     }
@@ -524,6 +550,7 @@ bool Backend::setBackupDirectory(const QString &directory) {
     m_lastPruned.clear();
     emit backupDirectoryChanged();
     emit preferencesChanged();
+    pruneBackups();
     setStatus(tr("Backup location updated."));
     return true;
 }
@@ -632,13 +659,14 @@ QByteArray Backend::libraryData() const {
 }
 
 bool Backend::writeLibraryFile(const QString &path, const QByteArray &data) {
+    if (!storageReady())
+        return false;
     if (data.size() > maxLibraryFileBytes) {
         setStatus(tr("The library is too large to save safely."));
         return false;
     }
     QSaveFile file(path);
-    file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly) || file.write(data) != data.size() || !file.commit()) {
+    if (!PrivateStorage::open(file) || file.write(data) != data.size() || !file.commit()) {
         setStatus(tr("The library could not be saved: %1").arg(file.errorString()));
         return false;
     }
@@ -652,8 +680,10 @@ void Backend::saveState() {
 }
 
 bool Backend::prepareBackupDirectory() {
+    if (!storageReady())
+        return false;
     if (m_backupDirectory == m_dataDirectory + QStringLiteral("/backups")
-        && !QDir().mkpath(m_backupDirectory)) {
+        && !PrivateStorage::directory(m_backupDirectory)) {
         setStatus(tr("Could not create the library backup folder."));
         return false;
     }
@@ -681,16 +711,17 @@ bool Backend::dailyBackup() {
 void Backend::pruneBackups() {
     const int days = m_preferences.value(QStringLiteral("backupRetentionDays")).toInt(30);
     const QString token = m_backupDirectory + QDate::currentDate().toString(Qt::ISODate) + QString::number(days);
-    if (days == 0 || m_lastPruned == token || m_backupCleanupActive)
+    if (m_lastPruned == token || m_backupCleanupActive || !m_storageReady)
         return;
     m_lastPruned = token;
     m_backupCleanupActive = true;
     m_backupLocker = std::make_unique<QEventLoopLocker>();
     const QString directory = m_backupDirectory;
     const QDate cutoff = QDate::currentDate().addDays(1 - days);
-    m_backupCleanup.setFuture(QtConcurrent::run([directory, cutoff] {
+    m_backupCleanup.setFuture(QtConcurrent::run([directory, cutoff, days] {
         const QRegularExpression daily(QStringLiteral("^daily-(\\d{4}-\\d{2}-\\d{2})\\.json$"));
         const QRegularExpression safety(QStringLiteral("^safety-(\\d{8}-\\d{6}-\\d{3})-[a-f0-9]{32}\\.json$"));
+        const QRegularExpression manual(QStringLiteral("^omacomics-\\d{8}-\\d{6}-\\d{3}-[a-f0-9]{32}\\.json$"));
         for (const QFileInfo &file : QDir(directory).entryInfoList(QDir::Files | QDir::NoSymLinks)) {
             QDate date;
             const auto dailyMatch = daily.match(file.fileName());
@@ -706,10 +737,13 @@ void Backend::pruneBackups() {
                 stamp.setTimeZone(QTimeZone::UTC);
                 date = stamp.toLocalTime().date();
             }
-            if (!date.isValid() || date >= cutoff)
+            const bool recognized = date.isValid() || manual.match(file.fileName()).hasMatch();
+            if (!recognized)
                 continue;
             QFile candidate(file.filePath());
-            if (!candidate.open(QIODevice::ReadOnly) || candidate.size() > maxLibraryFileBytes)
+            if (!candidate.open(QIODevice::ReadOnly))
+                return Backend::tr("Could not make a library backup private: %1").arg(file.fileName());
+            if (candidate.size() > maxLibraryFileBytes)
                 continue;
             QJsonParseError error;
             const QJsonDocument document = QJsonDocument::fromJson(candidate.readAll(), &error);
@@ -718,6 +752,10 @@ void Backend::pruneBackups() {
                 || !document.object().value(QStringLiteral("folders")).isArray())
                 continue;
             candidate.close();
+            if (!PrivateStorage::protectFile(file.filePath()))
+                return Backend::tr("Could not make a library backup private: %1").arg(file.fileName());
+            if (days == 0 || !date.isValid() || date >= cutoff)
+                continue;
             if (!QFile::remove(file.filePath()))
                 return Backend::tr("Could not remove an expired automatic backup: %1").arg(file.fileName());
         }
@@ -804,6 +842,8 @@ void Backend::clearImageCache() {
 }
 
 void Backend::startCacheWork(bool clear) {
+    if (!storageReady())
+        return;
     m_cacheActive = true;
     m_clearingCache = clear;
     m_cacheLocker = std::make_unique<QEventLoopLocker>();
@@ -903,6 +943,8 @@ void Backend::restoreLibrary(const QString &path) {
 }
 
 void Backend::writeCurrentStatus() {
+    if (!storageReady())
+        return;
     QJsonObject status;
     status.insert(QStringLiteral("title"), currentTitle().left(256));
     status.insert(QStringLiteral("path"), m_currentPath.left(4096));
@@ -916,8 +958,7 @@ void Backend::writeCurrentStatus() {
                   && m_pageCount > 0 && !finalPageVisible);
 
     QSaveFile file(m_currentStatusFile);
-    file.setDirectWriteFallback(false);
-    if (!file.open(QIODevice::WriteOnly)
+    if (!PrivateStorage::open(file)
         || file.write(QJsonDocument(status).toJson(QJsonDocument::Compact)) < 0
         || !file.commit())
         setStatus(tr("Reading progress could not be shared with the bar widget: %1").arg(file.errorString()));
@@ -1016,6 +1057,8 @@ void Backend::removeFromRecent(const QString &path) {
 }
 
 void Backend::scanLibrary() {
+    if (!storageReady())
+        return;
     if (m_clearingCache) {
         setStatus(tr("Wait for image cache cleanup to finish."));
         return;
@@ -1592,6 +1635,8 @@ void Backend::setCollection(const QString &path, const QString &collection) {
 }
 
 void Backend::ensureCover(const QString &path) {
+    if (!storageReady())
+        return;
     if (m_clearingCache || m_coverPaths.contains(path) || m_coverAttempted.contains(path) || !m_books.contains(path))
         return;
     if (m_scanning && m_scanPath == path) {
@@ -1654,9 +1699,8 @@ void Backend::startCoverExtraction() {
         return;
     }
     m_coverFile = std::make_unique<QSaveFile>(m_coverOutputPath);
-    m_coverFile->setDirectWriteFallback(false);
     m_coverBytes = 0;
-    if (!m_coverFile->open(QIODevice::WriteOnly)) {
+    if (!PrivateStorage::open(*m_coverFile)) {
         m_coverFile.reset();
         setStatus(tr("Could not create a cover thumbnail for %1.").arg(QFileInfo(m_currentCoverPath).fileName()));
         startCoverExtraction();
@@ -1686,6 +1730,8 @@ void Backend::finishCoverExtraction(int exitCode, QProcess::ExitStatus exitStatu
 }
 
 void Backend::openComic(const QString &path) {
+    if (!storageReady())
+        return;
     if (m_clearingCache) {
         setStatus(tr("Wait for image cache cleanup to finish."));
         return;
@@ -1739,6 +1785,8 @@ void Backend::openComic(const QString &path) {
 }
 
 void Backend::openExternalComic(const QString &path) {
+    if (!storageReady())
+        return;
     const QFileInfo info(path);
     const QString suffix = info.suffix().toLower();
     const bool supported = isArchive(path) || suffix == QStringLiteral("pdf");
@@ -1844,9 +1892,8 @@ void Backend::startNextPage() {
         return;
     }
     m_pageFile = std::make_unique<QSaveFile>(m_pageOutputPath);
-    m_pageFile->setDirectWriteFallback(false);
     m_pageBytes = 0;
-    if (!m_pageFile->open(QIODevice::WriteOnly)) {
+    if (!PrivateStorage::open(*m_pageFile)) {
         m_pageFile.reset();
         setStatus(tr("Could not cache page %1.").arg(index + 1));
         startNextPage();

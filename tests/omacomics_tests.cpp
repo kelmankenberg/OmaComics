@@ -26,9 +26,12 @@
 #include <QStandardPaths>
 #include <QWheelEvent>
 #include <QtTest>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "backend.h"
 #include "folderpicker.h"
+#include "privatestorage.h"
 #include "theme.h"
 #include "translator.h"
 
@@ -128,6 +131,11 @@ bool write(const QString &path, const QByteArray &contents) {
 int lines(const QString &path) {
     QFile file(path);
     return file.open(QIODevice::ReadOnly) ? file.readAll().count('\n') : 0;
+}
+
+int fileMode(const QString &path) {
+    struct stat info {};
+    return ::stat(QFile::encodeName(path).constData(), &info) == 0 ? int(info.st_mode & 0777) : -1;
 }
 
 // The window's item with this objectName. What a Repeater, ListView or Loader
@@ -294,6 +302,138 @@ class OmaComicsTests : public QObject {
 
 private slots:
     void initTestCase() { QQuickStyle::setStyle("Material"); }
+
+    void createsAndMigratesPrivateStorage() {
+        const mode_t previousMask = ::umask(0022);
+        const auto restoreMask = qScopeGuard([previousMask] { ::umask(previousMask); });
+        QTemporaryDir root;
+        const QString data = root.filePath("data");
+        const QString cache = root.filePath("cache");
+        QVERIFY(::chmod(QFile::encodeName(root.path()).constData(), 0755) == 0);
+        {
+            Backend backend(data, cache);
+            QVERIFY(backend.setPreference("zoomStep", 1));
+            for (const QString &directory : {data, cache, data + "/backups", cache + "/covers",
+                                            cache + "/pages", cache + "/indexes"})
+                QCOMPARE(fileMode(directory), 0700);
+            QCOMPARE(fileMode(root.path()), 0755);
+            QCOMPARE(fileMode(data + "/current.json"), 0600);
+            QCOMPARE(fileMode(data + "/settings.json"), 0600);
+            QTRY_VERIFY(!backend.backupCleanupBusy());
+        }
+        QVERIFY(write(data + "/library.json", R"({"books":[{"path":"/comic.cbz","title":"Private"}],"folders":[]})"));
+        QVERIFY(write(cache + "/covers/old.png", "old private cover"));
+        for (const QString &path : {data, cache, data + "/backups", cache + "/covers", cache + "/pages", cache + "/indexes"})
+            QVERIFY(::chmod(QFile::encodeName(path).constData(), 0755) == 0);
+        QVERIFY(::chmod(QFile::encodeName(data + "/library.json").constData(), 0644) == 0);
+        {
+            Backend backend(data, cache);
+            QCOMPARE(backend.comics().size(), 1);
+            for (const QString &path : {data, cache, data + "/backups", cache + "/covers", cache + "/pages", cache + "/indexes"})
+                QCOMPARE(fileMode(path), 0700);
+            backend.setCollection("/comic.cbz", "Private");
+            QCOMPARE(fileMode(data + "/library.json"), 0600);
+            QTRY_VERIFY(!backend.backupCleanupBusy());
+        }
+        QFile oldCover(cache + "/covers/old.png");
+        QVERIFY(oldCover.open(QIODevice::ReadOnly));
+        QCOMPARE(oldCover.readAll(), QByteArray("old private cover"));
+    }
+
+    void rejectsUnsafeStorageWithoutChangingTargets() {
+        QTemporaryDir root;
+        const QString target = root.filePath("originals");
+        QVERIFY(QDir().mkpath(target));
+        QVERIFY(::chmod(QFile::encodeName(target).constData(), 0755) == 0);
+        QVERIFY(QFile::link(target, root.filePath("data-link")));
+        {
+            Backend backend(root.filePath("data-link"), root.filePath("cache"));
+            QVERIFY(backend.status().startsWith("Could not secure private comic storage:"));
+            QVERIFY(!backend.setPreference("zoomStep", 2));
+            backend.openExternalComic(root.filePath("comic.cbz"));
+            backend.scanLibrary();
+            backend.backupLibrary(target);
+            QVERIFY(!backend.reading());
+            QVERIFY(!backend.scanning());
+            QVERIFY(!QFileInfo::exists(target + "/current.json"));
+            QCOMPARE(QDir(target).entryList(QDir::Files).size(), 0);
+        }
+        const QString cache = root.filePath("cache");
+        QVERIFY(QDir().mkpath(cache));
+        QVERIFY(QFile::link(target, cache + "/pages"));
+        Backend backend(root.filePath("data"), cache);
+        QVERIFY(backend.status().startsWith("Could not secure private comic storage:"));
+        QCOMPARE(fileMode(target), 0755);
+        QVERIFY(write(root.filePath("not-a-directory"), "keep"));
+        QVERIFY(!PrivateStorage::directory(root.filePath("not-a-directory")));
+        QVERIFY(!PrivateStorage::directory(QDir::rootPath()));
+        QVERIFY(!PrivateStorage::directory(QDir::homePath()));
+
+        const QString original = target + "/original.cbz";
+        QVERIFY(write(original, "original"));
+        QVERIFY(::chmod(QFile::encodeName(original).constData(), 0644) == 0);
+        QVERIFY(QFile::link(original, root.filePath("linked.json")));
+        QSaveFile linked(root.filePath("linked.json"));
+        QVERIFY(!PrivateStorage::open(linked));
+        QVERIFY(!PrivateStorage::protectFile(root.filePath("linked.json")));
+        const QString hardlink = root.filePath("hardlink.json");
+        QVERIFY(::link(QFile::encodeName(original).constData(), QFile::encodeName(hardlink).constData()) == 0);
+        QVERIFY(!PrivateStorage::protectFile(hardlink));
+        QCOMPARE(fileMode(original), 0644);
+    }
+
+    void keepsBackupsPrivateWithoutChangingSharedFolder() {
+        const mode_t previousMask = ::umask(0022);
+        const auto restoreMask = qScopeGuard([previousMask] { ::umask(previousMask); });
+        QTemporaryDir data, cache, shared, outside;
+        QVERIFY(::chmod(QFile::encodeName(shared.path()).constData(), 0755) == 0);
+        const QByteArray snapshot = R"({"books":[{"path":"/comic.cbz","title":"Private"}],"folders":[]})";
+        QVERIFY(write(data.filePath("library.json"), snapshot));
+        const QString legacy = shared.filePath("omacomics-20000101-000000-000-" + QString(32, '0') + ".json");
+        const QString daily = shared.filePath("daily-" + QDate::currentDate().toString(Qt::ISODate) + ".json");
+        const QString unrelated = shared.filePath("notes.json");
+        const QString symlink = shared.filePath("omacomics-20000102-000000-000-" + QString(32, '0') + ".json");
+        QVERIFY(write(legacy, snapshot));
+        QVERIFY(write(daily, snapshot));
+        QVERIFY(write(unrelated, "unrelated"));
+        QVERIFY(write(outside.filePath("original.json"), snapshot));
+        QVERIFY(QFile::link(outside.filePath("original.json"), symlink));
+        {
+            Backend backend(data.path(), cache.path());
+            QTRY_VERIFY(!backend.backupCleanupBusy());
+            QVERIFY(backend.setPreference("backupRetentionDays", 0));
+            QVERIFY(backend.setBackupDirectory(shared.path()));
+            QTRY_VERIFY(!backend.backupCleanupBusy());
+            QCOMPARE(fileMode(legacy), 0600);
+            QCOMPARE(fileMode(daily), 0600);
+            backend.backupLibrary();
+            backend.setCollection("/comic.cbz", "Private");
+            backend.removeFromRecent("/comic.cbz");
+            QTRY_VERIFY(!backend.backupCleanupBusy());
+            for (const QFileInfo &file : QDir(shared.path()).entryInfoList(
+                     {"omacomics-*.json", "daily-*.json", "safety-*.json"}, QDir::Files | QDir::NoSymLinks))
+                QCOMPARE(fileMode(file.filePath()), 0600);
+        }
+        QCOMPARE(fileMode(shared.path()), 0755);
+        QCOMPARE(fileMode(unrelated), 0644);
+        QCOMPARE(fileMode(outside.filePath("original.json")), 0644);
+    }
+
+    void reportsBackupPrivacyFailuresWithoutChangingOriginals() {
+        QTemporaryDir data, cache, shared, outside;
+        const QString original = outside.filePath("original.json");
+        const QString backup = shared.filePath("omacomics-20000101-000000-000-" + QString(32, '0') + ".json");
+        QVERIFY(write(original, R"({"books":[],"folders":[]})"));
+        QVERIFY(::chmod(QFile::encodeName(original).constData(), 0644) == 0);
+        QVERIFY(::link(QFile::encodeName(original).constData(), QFile::encodeName(backup).constData()) == 0);
+        Backend backend(data.path(), cache.path());
+        QTRY_VERIFY(!backend.backupCleanupBusy());
+        QVERIFY(backend.setBackupDirectory(shared.path()));
+        QTRY_VERIFY(backend.status().startsWith("Could not make a library backup private:"));
+        QTRY_VERIFY(!backend.backupCleanupBusy());
+        QCOMPARE(fileMode(original), 0644);
+        QVERIFY(QFileInfo::exists(backup));
+    }
 
     void buildsTreeWithoutResettingForMetadata() {
         ComicTreeModel model;
@@ -1461,6 +1601,8 @@ private slots:
     }
 
     void scansComicInfoAndReadsPages() {
+        const mode_t previousMask = ::umask(0022);
+        const auto restoreMask = qScopeGuard([previousMask] { ::umask(previousMask); });
         QTemporaryDir data, cache, library;
         QVERIFY(data.isValid());
         QVERIFY(cache.isValid());
@@ -1485,6 +1627,7 @@ private slots:
         QVERIFY(archive.waitForStarted());
         QVERIFY(archive.waitForFinished(10000));
         QCOMPARE(archive.exitCode(), 0);
+        QVERIFY(::chmod(QFile::encodeName(library.filePath("sample.cbz")).constData(), 0600) == 0);
 
         Backend backend(data.path(), cache.path());
         backend.addLibraryFolder(library.path());
@@ -1500,6 +1643,12 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!backend.comics().first().toMap().value("cover").toString().isEmpty(), 5000);
         backend.openComic(path);
         QTRY_VERIFY_WITH_TIMEOUT(!backend.pagePath().isEmpty(), 5000);
+        QCOMPARE(fileMode(QUrl(backend.pagePath()).toLocalFile()), 0600);
+        QCOMPARE(fileMode(QUrl(backend.comics().first().toMap().value("cover").toString()).toLocalFile()), 0600);
+        const QStringList indexes = QDir(cache.filePath("indexes")).entryList({"*.json"}, QDir::Files);
+        QVERIFY(!indexes.isEmpty());
+        QCOMPARE(fileMode(cache.filePath("indexes/" + indexes.first())), 0600);
+        QCOMPARE(fileMode(library.filePath("sample.cbz")), 0600);
         QCOMPARE(readingStatus(data.path()).value("inProgress").toBool(), true);
         QVERIFY(QFileInfo::exists(QUrl(backend.pagePath()).toLocalFile()));
         QCOMPARE(backend.currentPage(), 1);
@@ -1563,6 +1712,8 @@ private slots:
     }
 
     void scansAndReadsPdf() {
+        const mode_t previousMask = ::umask(0022);
+        const auto restoreMask = qScopeGuard([previousMask] { ::umask(previousMask); });
         QTemporaryDir data, cache, library;
         QVERIFY(data.isValid());
         QVERIFY(cache.isValid());
@@ -1573,15 +1724,21 @@ private slots:
         QVERIFY(painter.isActive());
         painter.drawText(100, 100, "Sample comic page");
         painter.end();
+        QVERIFY(::chmod(QFile::encodeName(library.filePath("notes.pdf")).constData(), 0600) == 0);
 
         Backend backend(data.path(), cache.path());
         backend.addLibraryFolder(library.path());
         QTRY_VERIFY_WITH_TIMEOUT(!backend.scanning(), 10000);
         QCOMPARE(backend.comics().size(), 1);
         QCOMPARE(backend.comics().first().toMap().value("pageCount").toInt(), 1);
+        backend.ensureCover(backend.comics().first().toMap().value("path").toString());
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.comics().first().toMap().value("cover").toString().isEmpty(), 10000);
         backend.openComic(backend.comics().first().toMap().value("path").toString());
         QTRY_VERIFY_WITH_TIMEOUT(!backend.pagePath().isEmpty(), 10000);
         QVERIFY(QFileInfo::exists(QUrl(backend.pagePath()).toLocalFile()));
+        QCOMPARE(fileMode(QUrl(backend.pagePath()).toLocalFile()), 0600);
+        QCOMPARE(fileMode(QUrl(backend.comics().first().toMap().value("cover").toString()).toLocalFile()), 0600);
+        QCOMPARE(fileMode(library.filePath("notes.pdf")), 0600);
     }
 
     void indexesOnlyNewAndChangedComics() {

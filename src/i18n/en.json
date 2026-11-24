@@ -12,6 +12,8 @@
   "Clear cached images…": "Clear cached images…",
   "Close the reader and wait for background work before clearing the image cache.": "Close the reader and wait for background work before clearing the image cache.",
   "Comic Vine": "Comic Vine",
+  "Could not make a library backup private: %1": "Could not make a library backup private: %1",
+  "Could not secure private comic storage: %1. Reading and indexing are disabled.": "Could not secure private comic storage: %1. Reading and indexing are disabled.",
   "Could not remove an expired automatic backup: %1": "Could not remove an expired automatic backup: %1",
   "Covers and page images will be generated again when needed. Your comics, metadata, bookmarks, and reading progress will not be deleted.": "Covers and page images will be generated again when needed. Your comics, metadata, bookmarks, and reading progress will not be deleted.",
   "Credential storage failed or was cancelled. No key was saved to application files.": "Credential storage failed or was cancelled. No key was saved to application files.",

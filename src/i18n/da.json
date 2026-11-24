@@ -12,6 +12,8 @@
   "Clear cached images…": "Ryd billeder i cachen…",
   "Close the reader and wait for background work before clearing the image cache.": "Luk læseren, og vent på baggrundsarbejdet, før du rydder billedcachen.",
   "Comic Vine": "Comic Vine",
+  "Could not make a library backup private: %1": "En sikkerhedskopi af biblioteket kunne ikke gøres privat: %1",
+  "Could not secure private comic storage: %1. Reading and indexing are disabled.": "Privat lagring af tegneserier kunne ikke sikres: %1. Læsning og indeksering er deaktiveret.",
   "Could not remove an expired automatic backup: %1": "En udløbet automatisk sikkerhedskopi kunne ikke fjernes: %1",
   "Covers and page images will be generated again when needed. Your comics, metadata, bookmarks, and reading progress will not be deleted.": "Omslag og sidebilleder oprettes igen efter behov. Dine tegneserier, metadata, bogmærker og din læseposition slettes ikke.",
   "Credential storage failed or was cancelled. No key was saved to application files.": "Lagring i nøgleringen mislykkedes eller blev annulleret. Ingen nøgle blev gemt i programmets filer.",

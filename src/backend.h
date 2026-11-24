@@ -159,6 +159,7 @@ signals:
 private:
     enum class ScanStage { Idle, ArchiveList, ArchiveMetadata, PdfInfo };
 
+    bool storageReady();
     void loadState();
     void loadSettings();
     bool savePreferences(const QJsonObject &preferences);
@@ -212,6 +213,8 @@ private:
     CredentialStore m_credentials;
     QJsonObject m_preferences;
     bool m_preferencesLoaded = false;
+    bool m_storageReady = false;
+    QString m_storageError;
     QString m_lastPruned;
     struct CacheResult { qint64 bytes = 0; QString error; };
     QFutureWatcher<CacheResult> m_cacheWork;
